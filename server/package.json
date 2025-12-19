@@ -1,0 +1,18 @@
+{
+    "name": "dice-server",
+    "version": "1.0.0",
+    "description": "Authoritative multiplayer dice game server",
+    "main": "src/index.js",
+    "type": "commonjs",
+    "scripts": {
+        "start": "node src/index.js",
+        "dev": "NODE_ENV=development node src/index.js",
+        "simulate": "node src/simulator.js",
+        "sim6": "node src/sixPlayerScenario.js"
+    },
+    "dependencies": {
+        "cannon-es": "^0.20.0",
+        "dotenv": "^16.4.5",
+        "ws": "^8.16.0"
+    }
+}

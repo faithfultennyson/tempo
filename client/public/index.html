@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>Multiplayer Dice</title>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+          "three/examples/jsm/loaders/OBJLoader.js": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/OBJLoader.js"
+        }
+      }
+    </script>
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <div id="topBar">
+        <div class="section">
+          <p class="label">Current Player</p>
+          <p class="value" id="currentPlayer">Waiting...</p>
+        </div>
+        <div class="section center" id="timerSection">
+          <p class="label">Timer</p>
+          <p class="value" id="timer">--</p>
+        </div>
+        <div class="section align-right">
+          <p class="label">Players</p>
+          <p class="value" id="playerCount">0</p>
+        </div>
+      </div>
+
+      <div id="canvasWrap">
+        <canvas id="gameCanvas"></canvas>
+        <div id="canvasLoader" class="hidden">Loading scene…</div>
+        <div id="canvasDebug">Debug overlay</div>
+      </div>
+
+      <div id="bottomBar">
+        <div class="score">
+          <p class="label">Your Score</p>
+          <p class="value" id="yourScore">0</p>
+        </div>
+        <button id="rollBtn" disabled>Waiting</button>
+      </div>
+
+      <div id="status" aria-live="polite"></div>
+    </div>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

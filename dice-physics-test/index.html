@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dice Physics – Soft Magnetic Snap (Server Safe)</title>
+
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+
+body {
+  font-family: 'Segoe UI', sans-serif;
+  background: linear-gradient(135deg,#667eea 0%,#764ba2 100%);
+  overflow:hidden;
+}
+
+#container {
+  width:100vw;
+  height:100vh;
+  display:flex;
+  flex-direction:column;
+  justify-content:center;
+  align-items:center;
+}
+
+#canvas-container {
+  position:relative;
+  box-shadow:0 20px 60px rgba(0,0,0,0.3);
+  border-radius:12px;
+  overflow:hidden;
+}
+
+canvas { display:block; }
+
+#controls {
+  margin-top:30px;
+  display:flex;
+  gap:20px;
+  align-items:center;
+}
+
+button {
+  padding:15px 40px;
+  font-size:18px;
+  font-weight:bold;
+  border:none;
+  border-radius:8px;
+  cursor:pointer;
+  transition:all 0.3s ease;
+}
+
+#rollBtn {
+  background:linear-gradient(135deg,#f093fb 0%,#f5576c 100%);
+  color:white;
+}
+
+#rollBtn:disabled {
+  opacity:0.5;
+  cursor:not-allowed;
+}
+
+#info {
+  background:white;
+  padding:15px 30px;
+  border-radius:8px;
+  font-size:22px;
+  font-weight:bold;
+  min-width:220px;
+  text-align:center;
+}
+</style>
+</head>
+
+<body>
+<div id="container">
+  <div id="canvas-container">
+    <canvas id="canvas"></canvas>
+  </div>
+  <div id="controls">
+    <button id="rollBtn">🎲 ROLL DICE</button>
+    <div id="info">Ready</div>
+  </div>
+</div>
+
+<!-- LIBRARIES -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js"></script>
+
+<script>
+/* ======================================================
+   CONFIG (SERVER SAFE)
+====================================================== */
+const CONFIG = {
+  CANVAS_WIDTH: 800,
+  CANVAS_HEIGHT: 600,
+  GRAVITY: -45,
+  TABLE_SIZE: 14,
+  DICE_SIZE: 1.5,
+  DICE_SCALE: 0.75,
+  SPAWN_HEIGHT: 7,
+  SPAWN_SPREAD: 2,
+  PHYSICS_HZ: 60,
+
+  ANGULAR_TUMBLE_STRENGTH: 18,
+  MICRO_IMPULSE_STRENGTH: 8,
+  ENABLE_MICRO_IMPULSE: true,
+  DELAYED_IMPULSE_MS: 1,
+
+  SETTLEMENT_VEL_THRESHOLD: 0.15,
+  SETTLEMENT_ANG_THRESHOLD: 0.15,
+  SETTLEMENT_TIME: 0.5,
+
+  MAGNETIC_SNAP_DURATION: 0.35,
+  MAGNETIC_PULL: 0.12,
+
+  // Montage settings
+  MONTAGE_DURATION: 2.0,
+  MONTAGE_SCALE_IN: 0.75,
+  MONTAGE_HOLD: 0.5,
+  MONTAGE_SCALE_OUT: 0.75,
+
+  // Sound settings
+  SHAKE_SOUND_DURATION: 1.112,
+  ROLL_SOUND_DELAY: 0.1,
+  ROLL_SOUND_STOP_THRESHOLD: 1.5
+};
+
+/* Dice local-space face normals */
+const FACE_MAP = {
+  1:[1,0,0], 2:[-1,0,0],
+  3:[0,1,0], 4:[0,-1,0],
+  5:[0,0,1], 6:[0,0,-1]
+};
+
+/* ======================================================
+   GLOBALS
+====================================================== */
+let scene, camera, renderer, world;
+let diceMeshes=[], diceBodies=[];
+let boardMesh, backgroundMesh, logoSprite=null;
+let diceTemplate=null, diceTexture=null, boardTexture=null, logoTexture=null;
+let assetsLoaded=false;
+let physicsInterval=null;
+let settlementTimer=0;
+let isRolling=false;
+
+// Sound tracking
+let lastShakeSound = 0;
+let lastRollSound = 0;
+let shakeSounds = [];
+let rollSounds = [];
+let currentRollSound = null;
+let rollSoundTriggered = false;
+let hasCollided = false;
+
+const rollBtn=document.getElementById('rollBtn');
+const infoDiv=document.getElementById('info');
+
+/* ======================================================
+   INIT
+====================================================== */
+init();
+
+function init(){
+  setupThree();
+  setupCannon();
+  setupLights();
+  loadAssets();
+  setupControls();
+  animate();
+}
+
+/* ======================================================
+   THREE
+====================================================== */
+function setupThree(){
+  scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x2a2a2a);
+
+  camera=new THREE.PerspectiveCamera(
+    45,
+    CONFIG.CANVAS_WIDTH/CONFIG.CANVAS_HEIGHT,
+    0.1,1000
+  );
+  camera.position.set(0,18,24);
+  camera.lookAt(0,0,0);
+
+  renderer=new THREE.WebGLRenderer({
+    canvas:document.getElementById('canvas'),
+    antialias:true
+  });
+  renderer.setSize(CONFIG.CANVAS_WIDTH,CONFIG.CANVAS_HEIGHT);
+  renderer.shadowMap.enabled=true;
+  renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+}
+
+/* ======================================================
+   LIGHTING (RESTORED & CORRECT)
+====================================================== */
+function setupLights(){
+  scene.add(new THREE.AmbientLight(0xffffff,0.6));
+
+  const dir=new THREE.DirectionalLight(0xffffff,0.8);
+  dir.position.set(5,10,5);
+  dir.castShadow=true;
+  dir.shadow.camera.left=-20;
+  dir.shadow.camera.right=20;
+  dir.shadow.camera.top=20;
+  dir.shadow.camera.bottom=-20;
+  scene.add(dir);
+}
+
+/* ======================================================
+   CANNON – UNIFIED TRAY
+====================================================== */
+function setupCannon(){
+  world=new CANNON.World();
+  world.gravity.set(0,CONFIG.GRAVITY,0);
+  world.allowSleep=true;
+
+  const half=CONFIG.TABLE_SIZE/2;
+  const tray=new CANNON.Body({ mass:0 });
+
+  tray.addShape(new CANNON.Box(new CANNON.Vec3(half,0.1,half)),new CANNON.Vec3(0,-0.1,0));
+
+  const h=3.5, t=1;
+  tray.addShape(new CANNON.Box(new CANNON.Vec3(half,h/2,t/2)),new CANNON.Vec3(0,h/2,half));
+  tray.addShape(new CANNON.Box(new CANNON.Vec3(half,h/2,t/2)),new CANNON.Vec3(0,h/2,-half));
+  tray.addShape(new CANNON.Box(new CANNON.Vec3(t/2,h/2,half)),new CANNON.Vec3(half,h/2,0));
+  tray.addShape(new CANNON.Box(new CANNON.Vec3(t/2,h/2,half)),new CANNON.Vec3(-half,h/2,0));
+
+  world.addBody(tray);
+}
+
+/* ======================================================
+   ASSET LOADING
+====================================================== */
+function loadAssets(){
+  let loaded=0;
+  const total=7; // board, dice texture, dice obj, logo, 2 shake sounds, 2 roll sounds
+  const done=()=>{ 
+    if(++loaded>=total){ 
+      createBoard(); 
+      createDice(); 
+      createLogoSprite();
+      assetsLoaded=true; 
+      infoDiv.textContent="Ready"; 
+    } 
+  };
+
+  const tl=new THREE.TextureLoader();
+  tl.load("/assets/board_1024.png",t=>{
+    boardTexture=t;
+    boardTexture.wrapS=boardTexture.wrapT=THREE.RepeatWrapping;
+    done();
+  },undefined,done);
+
+  tl.load("/assets/dice.png",t=>{ diceTexture=t; done(); },undefined,done);
+
+  tl.load("/assets/image/Dice_logo_new.png",t=>{ logoTexture=t; done(); },undefined,done);
+
+  const ol=new THREE.OBJLoader();
+  ol.load("/assets/Dice.obj",o=>{ diceTemplate=o; done(); },undefined,done);
+
+  // Load shake sounds
+  shakeSounds = [
+    new Audio('/assets/sound/Dice_Shake.mp3'),
+    new Audio('/assets/sound/Dice_Shake_2.mp3')
+  ];
+  shakeSounds.forEach(s => {
+    s.addEventListener('canplaythrough', done, { once: true });
+    s.load();
+  });
+
+  // Load roll sounds
+  rollSounds = [
+    new Audio('/assets/sound/Dice_Roll_1.mp3'),
+    new Audio('/assets/sound/Dice_Roll_2.mp3')
+  ];
+  rollSounds.forEach(s => {
+    s.addEventListener('canplaythrough', done, { once: true });
+    s.load();
+  });
+}
+
+/* ======================================================
+   TILEABLE BACKGROUND + BOARD (ORIGINAL STYLE)
+====================================================== */
+function createBoard(){
+  const bgSize=100;
+  const bgGeo=new THREE.PlaneGeometry(bgSize,bgSize);
+
+  const bgTex=boardTexture.clone();
+  bgTex.repeat.set(bgSize/CONFIG.TABLE_SIZE,bgSize/CONFIG.TABLE_SIZE);
+
+  const bgMat=new THREE.MeshStandardMaterial({
+    map:bgTex,
+    roughness:0.8
+  });
+
+  backgroundMesh=new THREE.Mesh(bgGeo,bgMat);
+  backgroundMesh.rotation.x=-Math.PI/2;
+  backgroundMesh.position.y=-0.01;
+  backgroundMesh.receiveShadow=true;
+  scene.add(backgroundMesh);
+
+  const geo=new THREE.PlaneGeometry(CONFIG.TABLE_SIZE,CONFIG.TABLE_SIZE);
+  const mat=new THREE.MeshStandardMaterial({
+    map:boardTexture,
+    roughness:0.8
+  });
+
+  boardMesh=new THREE.Mesh(geo,mat);
+  boardMesh.rotation.x=-Math.PI/2;
+  boardMesh.receiveShadow=true;
+  scene.add(boardMesh);
+}
+
+/* ======================================================
+   LOGO SPRITE
+====================================================== */
+function createLogoSprite(){
+  const spriteMat = new THREE.SpriteMaterial({ 
+    map: logoTexture,
+    transparent: true,
+    opacity: 0
+  });
+  logoSprite = new THREE.Sprite(spriteMat);
+  logoSprite.scale.set(15, 15, 1);
+  logoSprite.position.set(0, 5, 8); // Centered in camera view, between camera and board
+  logoSprite.visible = false;
+  scene.add(logoSprite);
+}
+
+function playMontage(callback){
+  if(!logoSprite) {
+    callback();
+    return;
+  }
+
+  logoSprite.visible = true;
+  logoSprite.material.opacity = 0;
+  logoSprite.scale.set(3, 3, 1);
+  logoSprite.material.rotation = 0;
+
+  const startTime = performance.now();
+  const scaleInEnd = CONFIG.MONTAGE_SCALE_IN * 1000;
+  const holdEnd = scaleInEnd + CONFIG.MONTAGE_HOLD * 1000;
+  const totalDuration = CONFIG.MONTAGE_DURATION * 1000;
+
+  function animate(){
+    const elapsed = performance.now() - startTime;
+    
+    if(elapsed < scaleInEnd){
+      // Scale in + fade in + spin
+      const t = elapsed / scaleInEnd;
+      const eased = easeOutCubic(t);
+      logoSprite.scale.set(3 + eased * 12, 3 + eased * 12, 1);
+      logoSprite.material.opacity = eased;
+      logoSprite.material.rotation = eased * Math.PI * 2;
+    }
+    else if(elapsed < holdEnd){
+      // Hold
+      logoSprite.scale.set(15, 15, 1);
+      logoSprite.material.opacity = 1;
+    }
+    else if(elapsed < totalDuration){
+      // Scale out + fade out + spin
+      const t = (elapsed - holdEnd) / (CONFIG.MONTAGE_SCALE_OUT * 1000);
+      const eased = easeInCubic(t);
+      logoSprite.scale.set(15 - eased * 12, 15 - eased * 12, 1);
+      logoSprite.material.opacity = 1 - eased;
+      logoSprite.material.rotation = Math.PI * 2 + eased * Math.PI * 2;
+    }
+    else {
+      // Done
+      logoSprite.visible = false;
+      callback();
+      return;
+    }
+
+    requestAnimationFrame(animate);
+  }
+
+  animate();
+}
+
+function easeOutCubic(t){ return 1 - Math.pow(1 - t, 3); }
+function easeInCubic(t){ return t * t * t; }
+
+/* ======================================================
+   DICE
+====================================================== */
+function createDice(){
+  // Clear any existing dice first
+  diceMeshes.forEach(mesh => scene.remove(mesh));
+  diceMeshes = [];
+  
+  for(let i=0;i<2;i++){
+    let mesh=diceTemplate.clone();
+    mesh.traverse(c=>{
+      if(c.isMesh){
+        c.material=new THREE.MeshStandardMaterial({ map:diceTexture });
+        c.castShadow=true;
+        c.receiveShadow=true;
+      }
+    });
+    mesh.scale.set(CONFIG.DICE_SCALE,CONFIG.DICE_SCALE,CONFIG.DICE_SCALE);
+    mesh.position.set(0,-10,0);
+    scene.add(mesh);
+    diceMeshes.push(mesh);
+  }
+}
+
+/* ======================================================
+   CONTROLS
+====================================================== */
+function setupControls(){
+  rollBtn.onclick=rollDice;
+}
+
+/* ======================================================
+   ROLL
+====================================================== */
+function rollDice(){
+  if(isRolling||!assetsLoaded) return;
+  isRolling=true;
+  settlementTimer=0;
+  rollSoundTriggered = false;
+  hasCollided = false;
+  rollBtn.disabled=true;
+  infoDiv.textContent="Rolling…";
+
+  // Check if dice bodies exist in the physics world (dice on board)
+  if(diceBodies.length > 0){
+    pickupDice(() => {
+      playShakeAndSpawn();
+    });
+  } else {
+    playShakeAndSpawn();
+  }
+}
+
+function pickupDice(callback){
+  // Only animate the dice that exist (should be 2)
+  const diceCount = Math.min(diceMeshes.length, 2);
+  
+  // Store initial positions and rotations for only the first 2 dice
+  const startData = [];
+  for(let i = 0; i < diceCount; i++){
+    startData.push({
+      posY: diceMeshes[i].position.y,
+      rotX: diceMeshes[i].rotation.x,
+      rotY: diceMeshes[i].rotation.y,
+      rotZ: diceMeshes[i].rotation.z
+    });
+  }
+  
+  const targetY = 30; // Out of camera view
+  const duration = 1000; // 1 second
+  const startTime = performance.now();
+
+  // Remove physics bodies immediately so they don't interfere
+  diceBodies.forEach(b => world.remove(b));
+  diceBodies = [];
+
+  function animate(){
+    const elapsed = performance.now() - startTime;
+    const t = Math.min(elapsed / duration, 1);
+    const eased = easeInQuad(t); // Smooth acceleration upward
+
+    // Only animate the first 2 dice
+    for(let i = 0; i < diceCount; i++){
+      const mesh = diceMeshes[i];
+      // Animate position upward
+      mesh.position.y = startData[i].posY + (targetY - startData[i].posY) * eased;
+      
+      // Add rotation for natural pickup effect
+      mesh.rotation.x = startData[i].rotX + (Math.PI * 2 * eased);
+      mesh.rotation.y = startData[i].rotY + (Math.PI * 1.5 * eased);
+      mesh.rotation.z = startData[i].rotZ + (Math.PI * eased);
+    }
+
+    if(t < 1){
+      requestAnimationFrame(animate);
+    } else {
+      callback();
+    }
+  }
+
+  animate();
+}
+
+function playShakeAndSpawn(){
+  // Play shake sound (alternating)
+  const shakeIndex = 1 - lastShakeSound;
+  lastShakeSound = shakeIndex;
+  
+  const shakeSound = shakeSounds[shakeIndex];
+  shakeSound.currentTime = 0;
+  shakeSound.play();
+
+  // Stop shake sound after duration and spawn dice
+  setTimeout(() => {
+    shakeSound.pause();
+    shakeSound.currentTime = 0;
+    spawnDice();
+  }, CONFIG.SHAKE_SOUND_DURATION * 1000);
+}
+
+function easeInQuad(t){ return t * t; }
+
+function spawnDice(){
+  diceBodies.forEach(b=>world.remove(b));
+  diceBodies=[];
+
+  for(let i=0;i<2;i++){
+    const body=new CANNON.Body({
+      mass:2.6,
+      shape:new CANNON.Box(new CANNON.Vec3(CONFIG.DICE_SIZE/2,CONFIG.DICE_SIZE/2,CONFIG.DICE_SIZE/2)),
+      linearDamping:0.12,
+      angularDamping:0.12,
+      allowSleep:true
+    });
+
+    body.position.set(
+      (Math.random()-0.5)*CONFIG.SPAWN_SPREAD,
+      CONFIG.SPAWN_HEIGHT+i*1.5,
+      (Math.random()-0.5)*CONFIG.SPAWN_SPREAD
+    );
+
+    body.angularVelocity.set(
+      (Math.random()-0.5)*CONFIG.ANGULAR_TUMBLE_STRENGTH,
+      (Math.random()-0.5)*CONFIG.ANGULAR_TUMBLE_STRENGTH,
+      (Math.random()-0.5)*CONFIG.ANGULAR_TUMBLE_STRENGTH
+    );
+
+    if(CONFIG.ENABLE_MICRO_IMPULSE){
+      setTimeout(()=>{
+        body.applyImpulse(
+          new CANNON.Vec3(
+            (Math.random()-0.5)*CONFIG.MICRO_IMPULSE_STRENGTH,
+            0,
+            (Math.random()-0.5)*CONFIG.MICRO_IMPULSE_STRENGTH
+          ),
+          body.position
+        );
+      },CONFIG.DELAYED_IMPULSE_MS);
+    }
+
+    body.sleepSpeedLimit=CONFIG.SETTLEMENT_VEL_THRESHOLD;
+    body.sleepTimeLimit=CONFIG.SETTLEMENT_TIME;
+
+    world.addBody(body);
+    diceBodies.push(body);
+  }
+
+  clearInterval(physicsInterval);
+  physicsInterval=setInterval(updatePhysics,1000/CONFIG.PHYSICS_HZ);
+}
+
+/* ======================================================
+   PHYSICS + SOFT MAGNETIC SNAP
+====================================================== */
+function updatePhysics(){
+  world.step(1/CONFIG.PHYSICS_HZ);
+
+  // Check for collision and trigger roll sound
+  if(!rollSoundTriggered && diceBodies.length > 0){
+    const anyDiceNearGround = diceBodies.some(b => b.position.y < 2);
+    
+    if(anyDiceNearGround && !hasCollided){
+      hasCollided = true;
+      setTimeout(() => {
+        playRollSound();
+        rollSoundTriggered = true;
+      }, CONFIG.ROLL_SOUND_DELAY * 1000);
+    }
+  }
+
+  // Check if dice are almost settled (stop roll sound)
+  if(currentRollSound && !currentRollSound.paused){
+    const almostSettled = diceBodies.every(b =>
+      b.velocity.length() < CONFIG.SETTLEMENT_VEL_THRESHOLD * CONFIG.ROLL_SOUND_STOP_THRESHOLD &&
+      b.angularVelocity.length() < CONFIG.SETTLEMENT_ANG_THRESHOLD * CONFIG.ROLL_SOUND_STOP_THRESHOLD
+    );
+
+    if(almostSettled){
+      currentRollSound.pause();
+      currentRollSound.currentTime = 0;
+    }
+  }
+
+  const settled=diceBodies.every(b =>
+    b.velocity.length()<CONFIG.SETTLEMENT_VEL_THRESHOLD &&
+    b.angularVelocity.length()<CONFIG.SETTLEMENT_ANG_THRESHOLD
+  );
+
+  settlementTimer = settled ? settlementTimer + 1/CONFIG.PHYSICS_HZ : 0;
+
+  if(settlementTimer>=CONFIG.SETTLEMENT_TIME){
+    clearInterval(physicsInterval);
+    finishRoll();
+  }
+}
+
+function playRollSound(){
+  const rollIndex = 1 - lastRollSound;
+  lastRollSound = rollIndex;
+  
+  currentRollSound = rollSounds[rollIndex];
+  currentRollSound.currentTime = 0;
+  currentRollSound.play();
+}
+
+function finishRoll(){
+  // Stop any playing roll sound
+  if(currentRollSound && !currentRollSound.paused){
+    currentRollSound.pause();
+    currentRollSound.currentTime = 0;
+  }
+
+  const results=diceBodies.map(b=>{
+    const face=getTopFace(b);
+    softMagneticSnap(b,face);
+    return face;
+  });
+
+  infoDiv.textContent=`Result: ${results[0]} + ${results[1]} = ${results[0]+results[1]}`;
+
+  // Play montage, then re-enable button
+  playMontage(() => {
+    isRolling=false;
+    rollBtn.disabled=false;
+  });
+}
+
+function softMagneticSnap(body,face){
+  const local=new CANNON.Vec3(...FACE_MAP[face]);
+  const up=new CANNON.Vec3(0,1,0);
+  const current=body.quaternion.vmult(local);
+
+  const correction=new CANNON.Quaternion();
+  correction.setFromVectors(current,up);
+
+  const start=body.quaternion.clone();
+  const end=correction.mult(start);
+
+  let t=0;
+  const step=1/CONFIG.PHYSICS_HZ;
+
+  const snap=setInterval(()=>{
+    t+=step;
+    const a=Math.min(t/CONFIG.MAGNETIC_SNAP_DURATION,1);
+    body.quaternion.slerp(end,body.quaternion,a);
+    body.angularVelocity.set(0,0,0);
+    if(a>=1) clearInterval(snap);
+  },1000/CONFIG.PHYSICS_HZ);
+}
+
+function getTopFace(body){
+  let best=1, max=-1;
+  const up=new CANNON.Vec3(0,1,0);
+  for(const k in FACE_MAP){
+    const n=body.quaternion.vmult(new CANNON.Vec3(...FACE_MAP[k]));
+    const d=n.dot(up);
+    if(d>max){ max=d; best=parseInt(k); }
+  }
+  return best;
+}
+
+/* ======================================================
+   RENDER
+====================================================== */
+function animate(){
+  requestAnimationFrame(animate);
+  diceBodies.forEach((b,i)=>{
+    diceMeshes[i].position.copy(b.position);
+    diceMeshes[i].quaternion.copy(b.quaternion);
+  });
+  renderer.render(scene,camera);
+}
+</script>
+</body>
+</html>
